@@ -1,6 +1,6 @@
 {
   "name": "safe-web-audit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Defensive, consent-based MCP server for non-invasive website safety checks.",
   "license": "MIT",
   "type": "module",

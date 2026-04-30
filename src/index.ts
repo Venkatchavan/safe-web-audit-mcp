@@ -282,7 +282,7 @@ function textContent(text: string) {
 
 function buildServer(): Server {
   const server = new Server(
-    { name: "safe-web-audit", version: "0.2.0" },
+    { name: "safe-web-audit", version: "0.2.1" },
     { capabilities: { tools: {} } },
   );
 
@@ -439,6 +439,7 @@ interface CliOptions {
   port: number;
   host: string;
   authToken?: string;
+  noAuth: boolean;
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -447,6 +448,7 @@ function parseArgs(argv: string[]): CliOptions {
     port: Number(process.env.PORT ?? 8787),
     host: process.env.HOST ?? "0.0.0.0",
     authToken: process.env.MCP_AUTH_TOKEN || undefined,
+    noAuth: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -455,6 +457,7 @@ function parseArgs(argv: string[]): CliOptions {
     else if (a === "--port") opts.port = Number(argv[++i]);
     else if (a === "--host") opts.host = argv[++i];
     else if (a === "--auth-token") opts.authToken = argv[++i];
+    else if (a === "--no-auth") opts.noAuth = true;
     else if (a === "--help" || a === "-h") printHelpAndExit(0);
   }
   if (!Number.isFinite(opts.port) || opts.port <= 0) {
@@ -478,6 +481,7 @@ Options:
   --port <n>            HTTP port (default: $PORT or 8787)
   --host <h>            HTTP bind host (default: 0.0.0.0)
   --auth-token <tok>    Require Bearer <tok> on HTTP (or set $MCP_AUTH_TOKEN)
+  --no-auth             Skip auth enforcement (local/dev only; NOT for public endpoints)
   -h, --help            Show this help
 `);
   process.exit(code);
@@ -489,7 +493,18 @@ async function runStdio() {
   await server.connect(transport);
 }
 
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+
 async function runHttp(opts: CliOptions) {
+  if (!LOOPBACK_HOSTS.has(opts.host) && !opts.authToken && !opts.noAuth) {
+    console.error(
+      "[safe-web-audit] FATAL: HTTP mode is binding to a non-loopback host (" + opts.host + ") without authentication.\n" +
+      "Set --auth-token <token> or the MCP_AUTH_TOKEN environment variable to protect this endpoint.\n" +
+      "For local-only development, use --host 127.0.0.1 instead.\n" +
+      "To explicitly opt out of this check (not recommended): pass --no-auth."
+    );
+    process.exit(1);
+  }
   const sessions = new Map<
     string,
     { server: Server; transport: StreamableHTTPServerTransport }

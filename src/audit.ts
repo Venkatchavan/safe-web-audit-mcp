@@ -11,6 +11,9 @@
  *   - save_history -> append snapshot to local timeline
  */
 
+import http from "node:http";
+import https from "node:https";
+
 import { validateUrlForAudit } from "./safety.js";
 import {
   analyzeHeaders,
@@ -129,6 +132,8 @@ export async function auditUrl(input: AuditInput): Promise<AuditReport> {
 
   const followRedirects = input.follow_redirects ?? true;
   let currentUrl = input.url;
+  // Pin the resolved IP after validation to prevent DNS rebinding on the actual fetch.
+  let pinnedIp: string | undefined = initialCheck.resolvedAddresses?.[0];
   const redirectChain: RedirectHop[] = [];
   const errors: string[] = [];
 
@@ -138,7 +143,7 @@ export async function auditUrl(input: AuditInput): Promise<AuditReport> {
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     let response: Response;
     try {
-      const result = await requestWithHeadFallback(currentUrl);
+      const result = await requestWithHeadFallback(currentUrl, pinnedIp);
       response = result.response;
       methodUsed = result.method;
     } catch (err) {
@@ -189,6 +194,7 @@ export async function auditUrl(input: AuditInput): Promise<AuditReport> {
       break;
     }
     currentUrl = nextUrl;
+    pinnedIp = check.resolvedAddresses?.[0]; // re-pin IP for next hop
 
     if (hop === MAX_REDIRECTS) {
       errors.push(`Stopped after ${MAX_REDIRECTS} redirects.`);
@@ -288,29 +294,37 @@ export async function auditUrl(input: AuditInput): Promise<AuditReport> {
 
 async function requestWithHeadFallback(
   url: string,
+  pinnedIp?: string,
 ): Promise<{ response: Response; method: "HEAD" | "GET" }> {
   try {
-    const response = await safeFetch(url, "HEAD");
+    const response = await safeFetch(url, "HEAD", pinnedIp);
     if (response.status === 405 || response.status === 501 || response.status === 400) {
       try {
         await response.body?.cancel();
       } catch {
         /* ignore */
       }
-      const getResp = await safeFetch(url, "GET");
+      const getResp = await safeFetch(url, "GET", pinnedIp);
       return { response: getResp, method: "GET" };
     }
     return { response, method: "HEAD" };
   } catch {
-    const getResp = await safeFetch(url, "GET");
+    const getResp = await safeFetch(url, "GET", pinnedIp);
     return { response: getResp, method: "GET" };
   }
 }
 
-async function safeFetch(url: string, method: "HEAD" | "GET"): Promise<Response> {
+async function safeFetch(
+  url: string,
+  method: "HEAD" | "GET",
+  pinnedIp?: string,
+): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
+    if (pinnedIp) {
+      return await safeFetchPinned(url, method, pinnedIp, controller.signal);
+    }
     return await fetch(url, {
       method,
       redirect: "manual",
@@ -320,4 +334,78 @@ async function safeFetch(url: string, method: "HEAD" | "GET"): Promise<Response>
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Fetch using a pre-validated pinned IP to prevent DNS rebinding.
+ * Connects directly to the resolved IP; passes the original hostname
+ * as the Host header (and as TLS SNI for HTTPS).
+ */
+function safeFetchPinned(
+  url: string,
+  method: "HEAD" | "GET",
+  pinnedIp: string,
+  signal: AbortSignal,
+): Promise<Response> {
+  return new Promise<Response>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error("Request aborted"));
+      return;
+    }
+    const u = new URL(url);
+    const isHttps = u.protocol === "https:";
+    const port = u.port ? Number(u.port) : (isHttps ? 443 : 80);
+    const path = (u.pathname + u.search) || "/";
+
+    const onAbort = () => req.destroy(new Error("Request aborted"));
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    const requestOptions: https.RequestOptions = {
+      hostname: pinnedIp,
+      port,
+      path,
+      method,
+      headers: {
+        "user-agent": USER_AGENT,
+        accept: "*/*",
+        host: u.host, // preserve original hostname for virtual hosting
+      },
+    };
+
+    if (isHttps) {
+      requestOptions.servername = u.hostname; // TLS SNI
+      requestOptions.rejectUnauthorized = true;
+    }
+
+    const mod: typeof https = isHttps ? https : (http as unknown as typeof https);
+    const req = mod.request(requestOptions, (res) => {
+      signal.removeEventListener("abort", onAbort);
+
+      // Build a Headers object, preserving multi-value headers (e.g. Set-Cookie).
+      const headerEntries: [string, string][] = [];
+      for (const [k, v] of Object.entries(res.headers)) {
+        if (v === undefined) continue;
+        if (Array.isArray(v)) {
+          for (const item of v) headerEntries.push([k, item]);
+        } else {
+          headerEntries.push([k, v as string]);
+        }
+      }
+
+      // Drain the body immediately — we only need headers.
+      res.resume();
+
+      resolve(new Response(null, {
+        status: res.statusCode ?? 0,
+        headers: new Headers(headerEntries),
+      }));
+    });
+
+    req.on("error", (err: Error) => {
+      signal.removeEventListener("abort", onAbort);
+      reject(err);
+    });
+
+    req.end();
+  });
 }
