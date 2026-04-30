@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "safe-web-audit": {
+      "command": "npx",
+      "args": ["-y", "safe-web-audit@latest"]
+    }
+  }
+}

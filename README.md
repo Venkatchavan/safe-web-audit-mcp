@@ -184,25 +184,32 @@ Settings → MCP → **Add new MCP server**, or `~/.cursor/mcp.json`:
 }
 ```
 
-### VS Code (GitHub Copilot Chat / agent mode)
+### VS Code — one-click Agent Plugin (recommended)
 
-Add to your user `settings.json`:
+The repo ships a `plugin.json` + `.mcp.json`, so VS Code can install it directly from the URL:
+
+1. Open the Command Palette (`⇧⌘P`) → **Chat: Install Plugin From Source**
+2. Paste `https://github.com/Venkatchavan/safe-web-audit-mcp.git`
+3. VS Code clones the plugin and registers `safe-web-audit` in your MCP server list automatically.
+
+You can also browse it in the Extensions view by typing `@agentPlugins` in the search field.
+
+### VS Code — manual config
+
+Add to your user `settings.json` (or `.vscode/mcp.json` for workspace-level):
 
 ```jsonc
+// .vscode/mcp.json  — already included in this repo
 {
-  "chat.mcp.enabled": true,
-  "mcp": {
-    "servers": {
-      "safe-web-audit": {
-        "command": "npx",
-        "args": ["-y", "safe-web-audit"]
-      }
+  "servers": {
+    "safe-web-audit": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "safe-web-audit@latest"]
     }
   }
 }
 ```
-
-Or create `.vscode/mcp.json` in a workspace.
 
 ### Continue (`continue.dev`)
 

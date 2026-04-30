@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "safe-web-audit": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "safe-web-audit@latest"]
+    }
+  }
+}

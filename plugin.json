@@ -1,0 +1,10 @@
+{
+  "name": "safe-web-audit",
+  "description": "Defensive, consent-based web security audit MCP server. Inspects security headers, cookies, redirects, and TLS — non-invasively, on sites you own or are authorized to test.",
+  "version": "0.2.0",
+  "author": {
+    "name": "Venkatchavan",
+    "url": "https://github.com/Venkatchavan/safe-web-audit-mcp"
+  },
+  "mcpServers": ".mcp.json"
+}
