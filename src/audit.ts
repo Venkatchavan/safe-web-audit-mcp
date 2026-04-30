@@ -3,6 +3,12 @@
  * (HEAD, falling back to GET) and analyzes response headers.
  *
  * Manually walks redirects so that every hop is re-validated for SSRF.
+ *
+ * Optional enrichment (all default-on, opt-out):
+ *   - humanize  -> attaches plain-language explanations per finding
+ *   - redact    -> Safe Evidence Mode (default true)
+ *   - site_type -> impact-based severity adjustment
+ *   - save_history -> append snapshot to local timeline
  */
 
 import { validateUrlForAudit } from "./safety.js";
@@ -10,8 +16,19 @@ import {
   analyzeHeaders,
   Finding,
   normalizeHeaders,
+  Severity,
   summarizeRisk,
 } from "./checks.js";
+import {
+  COMPLIANCE,
+  ComplianceMapping,
+  HUMANIZE,
+  Humanization,
+} from "./codes.js";
+import { redactValue } from "./redaction.js";
+import { adjustSeverity, SiteType, SITE_TYPE_NOTES } from "./scoring.js";
+import { hasConsent } from "./authorization.js";
+import { saveAudit } from "./storage.js";
 
 const REQUEST_TIMEOUT_MS = 8_000;
 const MAX_REDIRECTS = 5;
@@ -21,12 +38,26 @@ export interface AuditInput {
   url: string;
   confirm_authorized: boolean;
   follow_redirects?: boolean;
+  site_type?: SiteType;
+  redact?: boolean;
+  humanize?: boolean;
+  include_compliance?: boolean;
+  save_history?: boolean;
+  require_recorded_consent?: boolean;
 }
 
 export interface RedirectHop {
   from: string;
   to: string;
   status: number;
+}
+
+export interface EnrichedFinding extends Finding {
+  what_this_means?: string;
+  why_it_matters?: string;
+  who_can_fix?: string;
+  message_to_developer?: string;
+  compliance?: ComplianceMapping;
 }
 
 export interface AuditReport {
@@ -36,9 +67,13 @@ export interface AuditReport {
   method_used: "HEAD" | "GET" | null;
   redirect_chain: RedirectHop[];
   risk_summary: "low" | "medium" | "high";
-  findings: Finding[];
+  findings: EnrichedFinding[];
   positive_checks: string[];
   ethical_notice: string;
+  site_type?: SiteType;
+  site_type_note?: string;
+  redacted: boolean;
+  consent_recorded?: boolean;
   errors?: string[];
 }
 
@@ -46,6 +81,11 @@ const ETHICAL_NOTICE =
   "This is a non-invasive defensive audit. Only run it on sites you own or are explicitly authorized to test.";
 
 export async function auditUrl(input: AuditInput): Promise<AuditReport> {
+  const redact = input.redact !== false; // default true
+  const humanize = input.humanize !== false; // default true
+  const includeCompliance = input.include_compliance !== false; // default true
+  const siteType: SiteType = input.site_type ?? "other";
+
   const baseReport: AuditReport = {
     target_url: input.url,
     final_url: null,
@@ -56,26 +96,38 @@ export async function auditUrl(input: AuditInput): Promise<AuditReport> {
     findings: [],
     positive_checks: [],
     ethical_notice: ETHICAL_NOTICE,
+    site_type: siteType,
+    site_type_note: SITE_TYPE_NOTES[siteType],
+    redacted: redact,
   };
 
   if (input.confirm_authorized !== true) {
     return {
       ...baseReport,
-      risk_summary: "low",
       errors: [
         "Refusing to run: `confirm_authorized` must be true. Only audit sites you own or are authorized to test.",
       ],
     };
   }
 
-  const followRedirects = input.follow_redirects ?? true;
-
-  // Validate the initial URL.
   const initialCheck = await validateUrlForAudit(input.url);
   if (!initialCheck.ok) {
     return { ...baseReport, errors: [`Blocked: ${initialCheck.reason}`] };
   }
 
+  if (input.require_recorded_consent) {
+    const ok = await hasConsent(initialCheck.hostname ?? "");
+    if (!ok) {
+      return {
+        ...baseReport,
+        errors: [
+          `No prior consent record for ${initialCheck.hostname}. Use the verify_authorization tool first.`,
+        ],
+      };
+    }
+  }
+
+  const followRedirects = input.follow_redirects ?? true;
   let currentUrl = input.url;
   const redirectChain: RedirectHop[] = [];
   const errors: string[] = [];
@@ -101,7 +153,6 @@ export async function auditUrl(input: AuditInput): Promise<AuditReport> {
 
     if (!isRedirect || !followRedirects) {
       finalResponse = response;
-      // If we are not following redirects but got one, still capture the hop.
       if (isRedirect && !followRedirects) {
         const loc = response.headers.get("location");
         if (loc) {
@@ -109,7 +160,7 @@ export async function auditUrl(input: AuditInput): Promise<AuditReport> {
             const next = new URL(loc, currentUrl).toString();
             redirectChain.push({ from: currentUrl, to: next, status });
           } catch {
-            // ignore malformed Location
+            /* ignore */
           }
         }
       }
@@ -121,7 +172,6 @@ export async function auditUrl(input: AuditInput): Promise<AuditReport> {
       finalResponse = response;
       break;
     }
-
     let nextUrl: string;
     try {
       nextUrl = new URL(location, currentUrl).toString();
@@ -130,17 +180,14 @@ export async function auditUrl(input: AuditInput): Promise<AuditReport> {
       finalResponse = response;
       break;
     }
-
     redirectChain.push({ from: currentUrl, to: nextUrl, status });
 
-    // Re-validate the redirect target against the same safety rules.
     const check = await validateUrlForAudit(nextUrl);
     if (!check.ok) {
       errors.push(`Blocked redirect to ${nextUrl}: ${check.reason}`);
       finalResponse = response;
       break;
     }
-
     currentUrl = nextUrl;
 
     if (hop === MAX_REDIRECTS) {
@@ -162,6 +209,31 @@ export async function auditUrl(input: AuditInput): Promise<AuditReport> {
   const headers = normalizeHeaders(finalResponse.headers);
   const { findings, positives } = analyzeHeaders(headers, finalUrl);
 
+  // Impact-based scoring
+  const adjusted: Finding[] = findings.map((f) => ({
+    ...f,
+    severity: adjustSeverity(f.code, f.severity, siteType) as Severity,
+  }));
+
+  // Humanize / compliance enrichment
+  const enriched: EnrichedFinding[] = adjusted.map((f) => {
+    const out: EnrichedFinding = { ...f };
+    if (humanize) {
+      const h: Humanization | undefined = HUMANIZE[f.code];
+      if (h) {
+        out.what_this_means = h.what_this_means;
+        out.why_it_matters = h.why_it_matters;
+        out.who_can_fix = h.who_can_fix;
+        out.message_to_developer = h.message_to_developer;
+      }
+    }
+    if (includeCompliance) {
+      const c = COMPLIANCE[f.code];
+      if (c) out.compliance = c;
+    }
+    return out;
+  });
+
   if (redirectChain.length > 0) {
     positives.push(`Followed ${redirectChain.length} redirect(s) safely.`);
   }
@@ -169,7 +241,6 @@ export async function auditUrl(input: AuditInput): Promise<AuditReport> {
     positives.push("HTTP request was upgraded to HTTPS via redirect.");
   }
 
-  // Drain body to free the connection (we never use it).
   try {
     if (finalResponse.body && typeof finalResponse.body.cancel === "function") {
       await finalResponse.body.cancel();
@@ -178,28 +249,48 @@ export async function auditUrl(input: AuditInput): Promise<AuditReport> {
     /* ignore */
   }
 
-  const report: AuditReport = {
+  let report: AuditReport = {
     target_url: input.url,
     final_url: finalUrl.toString(),
     status: finalResponse.status,
     method_used: methodUsed,
     redirect_chain: redirectChain,
-    risk_summary: summarizeRisk(findings),
-    findings,
+    risk_summary: summarizeRisk(enriched),
+    findings: enriched,
     positive_checks: positives,
     ethical_notice: ETHICAL_NOTICE,
+    site_type: siteType,
+    site_type_note: SITE_TYPE_NOTES[siteType],
+    redacted: redact,
   };
   if (errors.length > 0) report.errors = errors;
+
+  // Redaction is applied to the final report so all enrichment fields are
+  // also scrubbed. The `redacted` boolean reflects the requested mode.
+  if (redact) {
+    report = redactValue(report);
+    report.redacted = true;
+  }
+
+  if (input.save_history) {
+    try {
+      await saveAudit(report, siteType);
+    } catch (err) {
+      report.errors = [
+        ...(report.errors ?? []),
+        `Could not save history: ${err instanceof Error ? err.message : String(err)}`,
+      ];
+    }
+  }
+
   return report;
 }
 
 async function requestWithHeadFallback(
   url: string,
 ): Promise<{ response: Response; method: "HEAD" | "GET" }> {
-  // HEAD first.
   try {
     const response = await safeFetch(url, "HEAD");
-    // Some servers return 405/501 for HEAD; fall back to GET.
     if (response.status === 405 || response.status === 501 || response.status === 400) {
       try {
         await response.body?.cancel();
@@ -222,13 +313,9 @@ async function safeFetch(url: string, method: "HEAD" | "GET"): Promise<Response>
   try {
     return await fetch(url, {
       method,
-      // We handle redirects manually so each hop is re-validated.
       redirect: "manual",
       signal: controller.signal,
-      headers: {
-        "user-agent": USER_AGENT,
-        accept: "*/*",
-      },
+      headers: { "user-agent": USER_AGENT, accept: "*/*" },
     });
   } finally {
     clearTimeout(timer);

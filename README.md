@@ -9,9 +9,29 @@ It is designed for site owners and authorized testers who want a quick read on t
 
 ---
 
-## What it does
+## Tools
 
-A single MCP tool, `audit_url`, makes **one** HTTP request (HEAD, with a GET fallback) to the target URL and reports:
+| Tool | What it does |
+|------|--------------|
+| `audit_url` | Non-invasive defensive audit. Adds **human-friendly explanations**, **compliance mapping** (OWASP / CIS / ISO / privacy), **impact-based scoring** by `site_type`, **Safe Evidence Mode** (redacts cookies, tokens, emails, IPs), and optional **local timeline** snapshot. |
+| `verify_authorization` | Prove ownership via DNS TXT (`_safe-web-audit.<host>`), an HTML well-known file (`/.well-known/safe-web-audit.txt`), or a signed statement. Verified consent is recorded locally. |
+| `generate_fixes` | Returns ready-to-paste config snippets for **Nginx, Apache, Caddy, Cloudflare, Vercel, Netlify, Express, Django, Rails, WordPress** keyed off finding codes (e.g. `MISSING_HSTS`). |
+| `audit_history` | Lists locally-saved audits or **diffs the last two** for a target — what improved, what remains. Data never leaves your machine. |
+| `generate_template` | Produces public-good docs: `security.txt`, responsible-disclosure page, password policy, backup checklist, incident-contact plan. |
+| `emergency_checklist` | Calm, defensive incident-response checklist: preserve logs, rotate keys, take exposed admin panels offline, contact hosting, plan user notification. |
+
+### Defensive by construction
+
+- ❌ No crawling, link-following, fuzzing, brute-forcing, login, or form submission
+- ❌ No `POST` / `PUT` / `DELETE` / `PATCH`
+- ❌ No requests to private/internal IPs (SSRF guarded)
+- ✅ Safe Evidence Mode is **on by default** — sensitive data is redacted
+- ✅ Every redirect hop is re-validated
+- ✅ All history and consent stay local at `~/.safe-web-audit/` (override with `SAFE_WEB_AUDIT_HOME`)
+
+## What `audit_url` reports
+
+A single HEAD (with GET fallback) request and a structured report including:
 
 - Whether HTTPS is used
 - Final status code, method used, and full redirect chain
@@ -314,6 +334,41 @@ Without following redirects:
 ```
 
 Refusal example (no consent) — the tool returns an error report instructing the caller to set `confirm_authorized: true`.
+
+### Authorization Proof flow
+
+For stronger consent, use `verify_authorization` first:
+
+```jsonc
+// 1) Get a token
+{ "name": "verify_authorization",
+  "arguments": { "url": "https://example.com", "method": "dns", "generate_token": true } }
+
+// 2) Publish the TXT record at _safe-web-audit.example.com  (or the well-known file)
+
+// 3) Verify
+{ "name": "verify_authorization",
+  "arguments": { "url": "https://example.com", "method": "dns",
+                 "token": "swa-…", "identity": "owner@example.com" } }
+
+// 4) Audit, requiring recorded consent
+{ "name": "audit_url",
+  "arguments": { "url": "https://example.com", "confirm_authorized": true,
+                 "site_type": "ecommerce", "save_history": true,
+                 "require_recorded_consent": true } }
+
+// 5) After applying fixes, run audit again then diff:
+{ "name": "audit_history",
+  "arguments": { "action": "compare", "url": "https://example.com" } }
+```
+
+### Fix Generator
+
+```jsonc
+{ "name": "generate_fixes",
+  "arguments": { "platform": "nginx",
+                 "finding_codes": ["MISSING_HSTS", "MISSING_CSP", "MISSING_X_FRAME_OPTIONS"] } }
+```
 
 ### Example output (abridged)
 

@@ -1,10 +1,15 @@
 /**
  * Header / cookie analysis for the audit_url tool.
+ * Each Finding has a stable `code` so other features (humanize, fixes,
+ * compliance, history diff) can correlate.
  */
+
+import type { FindingCode } from "./codes.js";
 
 export type Severity = "info" | "low" | "medium" | "high";
 
 export interface Finding {
+  code: FindingCode;
   title: string;
   severity: Severity;
   evidence: string;
@@ -16,14 +21,18 @@ export interface HeaderAnalysis {
   positives: string[];
 }
 
-const SECURITY_HEADERS: Array<{
+interface SecHeaderSpec {
   name: string;
+  code: FindingCode;
   severity: Severity;
   recommendation: string;
   validate?: (value: string) => Finding | null;
-}> = [
+}
+
+const SECURITY_HEADERS: SecHeaderSpec[] = [
   {
     name: "strict-transport-security",
+    code: "MISSING_HSTS",
     severity: "medium",
     recommendation:
       "Add `Strict-Transport-Security: max-age=31536000; includeSubDomains` (HTTPS only).",
@@ -32,6 +41,7 @@ const SECURITY_HEADERS: Array<{
       const age = m ? Number(m[1]) : 0;
       if (age < 15552000) {
         return {
+          code: "WEAK_HSTS",
           title: "Weak Strict-Transport-Security max-age",
           severity: "low",
           evidence: `Strict-Transport-Security: ${value}`,
@@ -44,23 +54,27 @@ const SECURITY_HEADERS: Array<{
   },
   {
     name: "content-security-policy",
+    code: "MISSING_CSP",
     severity: "medium",
     recommendation:
       "Define a Content-Security-Policy that restricts script, frame, and connect sources.",
   },
   {
     name: "x-frame-options",
+    code: "MISSING_X_FRAME_OPTIONS",
     severity: "low",
     recommendation:
       "Set `X-Frame-Options: DENY` (or use CSP `frame-ancestors`) to mitigate clickjacking.",
   },
   {
     name: "x-content-type-options",
+    code: "MISSING_X_CONTENT_TYPE_OPTIONS",
     severity: "low",
     recommendation: "Set `X-Content-Type-Options: nosniff`.",
     validate: (value) => {
       if (value.trim().toLowerCase() !== "nosniff") {
         return {
+          code: "WEAK_X_CONTENT_TYPE_OPTIONS",
           title: "X-Content-Type-Options is not 'nosniff'",
           severity: "low",
           evidence: `X-Content-Type-Options: ${value}`,
@@ -72,22 +86,21 @@ const SECURITY_HEADERS: Array<{
   },
   {
     name: "referrer-policy",
+    code: "MISSING_REFERRER_POLICY",
     severity: "low",
     recommendation:
       "Set a Referrer-Policy such as `strict-origin-when-cross-origin` or `no-referrer`.",
   },
   {
     name: "permissions-policy",
+    code: "MISSING_PERMISSIONS_POLICY",
     severity: "low",
     recommendation:
       "Define a Permissions-Policy to disable powerful features you do not use (e.g. `geolocation=(), camera=()`).",
   },
 ];
 
-const INFO_DISCLOSURE_HEADERS = ["server", "x-powered-by", "x-aspnet-version"];
-
 export interface NormalizedHeaders {
-  // lowercase header name -> array of values
   map: Map<string, string[]>;
 }
 
@@ -102,7 +115,6 @@ export function normalizeHeaders(
       list.push(value);
       map.set(k, list);
     });
-    // getSetCookie if available (Node 20+)
     const anyHeaders = raw as unknown as { getSetCookie?: () => string[] };
     if (typeof anyHeaders.getSetCookie === "function") {
       const cookies = anyHeaders.getSetCookie();
@@ -127,11 +139,11 @@ export function analyzeHeaders(
 
   for (const spec of SECURITY_HEADERS) {
     const values = headers.map.get(spec.name);
-    // HSTS is only meaningful over HTTPS.
     if (spec.name === "strict-transport-security" && !isHttps) continue;
 
     if (!values || values.length === 0) {
       findings.push({
+        code: spec.code,
         title: `Missing ${prettyHeader(spec.name)} header`,
         severity: spec.severity,
         evidence: `No ${prettyHeader(spec.name)} header in response.`,
@@ -149,23 +161,27 @@ export function analyzeHeaders(
   }
 
   // Information disclosure
-  for (const name of INFO_DISCLOSURE_HEADERS) {
-    const values = headers.map.get(name);
-    if (values && values.length > 0) {
-      const value = values.join(", ");
-      // Only flag if it looks like it leaks version info (contains a digit)
-      // or is x-powered-by (usually not needed at all).
-      const looksVersioned = /\d/.test(value);
-      const severity: Severity =
-        name === "x-powered-by" || looksVersioned ? "low" : "info";
-      findings.push({
-        title: `Server software disclosed via ${prettyHeader(name)}`,
-        severity,
-        evidence: `${prettyHeader(name)}: ${truncate(value, 200)}`,
-        recommendation:
-          "Remove or genericize this header to avoid disclosing software/version details.",
-      });
-    }
+  const serverVal = headers.map.get("server")?.join(", ");
+  if (serverVal) {
+    findings.push({
+      code: "SERVER_HEADER_DISCLOSURE",
+      title: "Server software disclosed via Server header",
+      severity: /\d/.test(serverVal) ? "low" : "info",
+      evidence: `Server: ${truncate(serverVal, 200)}`,
+      recommendation:
+        "Remove or genericize this header to avoid disclosing software/version details.",
+    });
+  }
+  const poweredVal = headers.map.get("x-powered-by")?.join(", ");
+  if (poweredVal) {
+    findings.push({
+      code: "X_POWERED_BY_DISCLOSURE",
+      title: "Server framework disclosed via X-Powered-By",
+      severity: "low",
+      evidence: `X-Powered-By: ${truncate(poweredVal, 200)}`,
+      recommendation:
+        "Remove this header (it serves no purpose for visitors and helps attackers).",
+    });
   }
 
   // Cookie flags
@@ -179,6 +195,7 @@ export function analyzeHeaders(
 
     if (isHttps && !hasSecure) {
       findings.push({
+        code: "COOKIE_NO_SECURE",
         title: `Cookie '${cookieName}' missing Secure flag`,
         severity: "medium",
         evidence: truncate(cookie, 200),
@@ -187,6 +204,7 @@ export function analyzeHeaders(
     }
     if (!hasHttpOnly) {
       findings.push({
+        code: "COOKIE_NO_HTTPONLY",
         title: `Cookie '${cookieName}' missing HttpOnly flag`,
         severity: "low",
         evidence: truncate(cookie, 200),
@@ -196,6 +214,7 @@ export function analyzeHeaders(
     }
     if (!sameSiteMatch) {
       findings.push({
+        code: "COOKIE_NO_SAMESITE",
         title: `Cookie '${cookieName}' missing SameSite attribute`,
         severity: "low",
         evidence: truncate(cookie, 200),
@@ -203,6 +222,7 @@ export function analyzeHeaders(
       });
     } else if (sameSiteMatch[1] === "none" && !hasSecure) {
       findings.push({
+        code: "COOKIE_SAMESITE_NONE_NO_SECURE",
         title: `Cookie '${cookieName}' uses SameSite=None without Secure`,
         severity: "medium",
         evidence: truncate(cookie, 200),
@@ -213,6 +233,7 @@ export function analyzeHeaders(
 
   if (!isHttps) {
     findings.push({
+      code: "NO_HTTPS",
       title: "Site is not served over HTTPS",
       severity: "high",
       evidence: `Final URL uses ${finalUrl.protocol}`,
