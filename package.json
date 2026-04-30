@@ -1,0 +1,58 @@
+{
+  "name": "safe-web-audit",
+  "version": "0.1.0",
+  "description": "Defensive, consent-based MCP server for non-invasive website safety checks.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "safe-web-audit": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "security",
+    "audit",
+    "headers",
+    "claude",
+    "cursor",
+    "vscode",
+    "ai-tools"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Venkatchavan/safe-web-audit-mcp.git"
+  },
+  "homepage": "https://github.com/Venkatchavan/safe-web-audit-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/Venkatchavan/safe-web-audit-mcp/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch",
+    "test": "node --test --import tsx test/*.test.ts",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "tsx": "^4.19.2",
+    "typescript": "^5.5.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

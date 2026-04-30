@@ -1,0 +1,11 @@
+node_modules
+dist
+.git
+.github
+.gitignore
+.dockerignore
+test
+*.log
+.DS_Store
+.env
+Prompt.md
